@@ -1,0 +1,372 @@
+# @format
+
+services:
+  postgres:
+    container_name: postgres-halalgoes
+    image: postgis/postgis:17-3.6-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${HG_DB:-halalgoes_db}
+      POSTGRES_USER: ${HG_DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${HG_DB_PASS}
+      POSTGRES_INITDB_ARGS: --encoding=UTF-8 --lc-collate=C --lc-ctype=C
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "pg_isready",
+          "-q",
+          "-d",
+          "${HG_DB:-halalgoes_db}",
+          "-U",
+          "${HG_DB_USER:-postgres}",
+        ]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    networks:
+      halalgoes-network:
+        ipv4_address: 172.21.0.10
+
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.24.1-p1
+    container_name: pgbouncer-halalgoes
+    restart: unless-stopped
+    environment:
+      DB_HOST: postgres-halalgoes
+      DB_PORT: 5432
+      DB_USER: ${HG_DB_USER:-postgres}
+      DB_PASSWORD: ${HG_DB_PASS}
+      DB_NAME: ${HG_DB:-halalgoes_db}
+      AUTH_TYPE: md5
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: ${PGBOUNCER_MAX_CLIENT_CONN:-100}
+      DEFAULT_POOL_SIZE: ${PGBOUNCER_DEFAULT_POOL_SIZE:-20}
+      MIN_POOL_SIZE: ${PGBOUNCER_MIN_POOL_SIZE:-5}
+      RESERVE_POOL_SIZE: ${PGBOUNCER_RESERVE_POOL_SIZE:-5}
+      SERVER_LIFE_TIME: ${PGBOUNCER_SERVER_LIFE_TIME:-3600}
+      SERVER_IDLE_TIMEOUT: ${PGBOUNCER_SERVER_IDLE_TIMEOUT:-600}
+      SERVER_CONNECT_TIMEOUT: ${PGBOUNCER_SERVER_CONNECT_TIMEOUT:-15}
+      CLIENT_LOGIN_TIMEOUT: ${PGBOUNCER_CLIENT_LOGIN_TIMEOUT:-60}
+      QUERY_WAIT_TIMEOUT: ${PGBOUNCER_QUERY_WAIT_TIMEOUT:-120}
+      ADMIN_USERS: ${PGBOUNCER_ADMIN_USERS:-postgres,dbuser}
+    ports:
+      - "${PGBOUNCER_PORT:-6432}:6432"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      halalgoes-network:
+        ipv4_address: 172.21.0.11
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: pgadmin-halalgoes
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASS}
+      PGADMIN_DISABLE_POSTFIX: "true"
+      PGADMIN_CONFIG_ENHANCED_COOKIE_PROTECTION: "False"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    ports:
+      - "${PGADMIN_PORT:-5050}:80"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      halalgoes-network:
+        ipv4_address: 172.21.0.12
+
+  redis-master:
+    image: redis:latest
+    container_name: redis-master
+    hostname: redis-master
+    restart: unless-stopped
+    ports:
+      - "${REDIS_MASTER_PORT:-6379}:6379"
+    volumes:
+      - ./config/redis/master/redis.conf:/usr/local/etc/redis/redis.conf
+    command:
+      [
+        "redis-server",
+        "/usr/local/etc/redis/redis.conf",
+        "--appendonly",
+        "yes",
+        "--repl-diskless-load",
+        "on-empty-db",
+        "--replica-announce-ip",
+        "${HOST_IP}",
+        "--replica-announce-port",
+        "6379",
+        "--protected-mode",
+        "no",
+      ]
+    networks:
+      halalgoes-network:
+        ipv4_address: 172.21.0.3
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  redis-slave-1:
+    image: redis:latest
+    container_name: redis-slave-1
+    hostname: redis-slave-1
+    restart: unless-stopped
+    depends_on:
+      redis-master:
+        condition: service_healthy
+    volumes:
+      - redis_replica1_data:/data
+    command:
+      [
+        "redis-server",
+        "--appendonly",
+        "yes",
+        "--replicaof",
+        "redis-master",
+        "6379",
+        "--repl-diskless-load",
+        "on-empty-db",
+        "--replica-announce-ip",
+        "${HOST_IP}",
+        "--replica-announce-port",
+        "6380",
+        "--protected-mode",
+        "no",
+      ]
+    networks:
+      halalgoes-network:
+        ipv4_address: 172.21.0.4
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  redis-slave-2:
+    image: redis:latest
+    container_name: redis-slave-2
+    hostname: redis-slave-2
+    restart: unless-stopped
+    depends_on:
+      redis-master:
+        condition: service_healthy
+    volumes:
+      - redis_replica2_data:/data
+    command:
+      [
+        "redis-server",
+        "--appendonly",
+        "yes",
+        "--replicaof",
+        "redis-master",
+        "6379",
+        "--repl-diskless-load",
+        "on-empty-db",
+        "--replica-announce-ip",
+        "${HOST_IP}",
+        "--replica-announce-port",
+        "6381",
+        "--protected-mode",
+        "no",
+      ]
+    networks:
+      halalgoes-network:
+        ipv4_address: 172.21.0.5
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  sentinel-1:
+    image: redis:latest
+    container_name: sentinel-1
+    hostname: sentinel-1
+    depends_on:
+      - redis-master
+    ports:
+      - "${REDIS_SENTINEL_1_PORT:-26379}:26379"
+    command: >
+      sh -c 'echo "bind 0.0.0.0" > /etc/sentinel.conf &&
+            echo "sentinel monitor mymaster ${HOST_IP} 6379 2" >> /etc/sentinel.conf &&
+            echo "sentinel resolve-hostnames yes" >> /etc/sentinel.conf &&
+            echo "sentinel down-after-milliseconds mymaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel failover-timeout mymaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel parallel-syncs mymaster 1" >> /etc/sentinel.conf &&
+            redis-sentinel /etc/sentinel.conf'
+    networks:
+      halalgoes-network:
+        ipv4_address: 172.21.0.6
+
+  sentinel-2:
+    image: redis:latest
+    container_name: sentinel-2
+    hostname: sentinel-2
+    depends_on:
+      - redis-master
+    ports:
+      - "${REDIS_SENTINEL_2_PORT:-26380}:26379"
+    command: >
+      sh -c 'echo "bind 0.0.0.0" > /etc/sentinel.conf &&
+            echo "sentinel monitor mymaster ${HOST_IP} 6379 2" >> /etc/sentinel.conf &&
+            echo "sentinel resolve-hostnames yes" >> /etc/sentinel.conf &&
+            echo "sentinel down-after-milliseconds mymaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel failover-timeout mymaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel parallel-syncs mymaster 1" >> /etc/sentinel.conf &&
+            redis-sentinel /etc/sentinel.conf'
+    networks:
+      halalgoes-network:
+        ipv4_address: 172.21.0.7
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "26380", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  redisinsight:
+    image: redis/redisinsight:latest
+    container_name: redisinsight
+    ports:
+      - "5540:5540"
+    networks:
+      halalgoes-network:
+        ipv4_address: 172.21.0.9
+
+  minio:
+    container_name: hg-file-storage
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BROWSER: ${MINIO_BROWSER:-on}
+      MINIO_REGION: ${MINIO_REGION:-us-east-1}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      halalgoes-network:
+        ipv4_address: 172.21.0.20
+
+  temporal:
+    container_name: temporal
+    image: temporalio/auto-setup:latest
+    restart: unless-stopped
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: ${HG_DB_USER:-postgres}
+      POSTGRES_PWD: ${HG_DB_PASS}
+      POSTGRES_SEEDS: postgres
+    ports:
+      - "${TEMPORAL_PORT:-7233}:7233"
+    networks:
+      halalgoes-network:
+        ipv4_address: 172.21.0.13
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  temporal-admin-tools:
+    container_name: temporal-admin-tools
+    image: temporalio/admin-tools:latest
+    restart: unless-stopped
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    networks:
+      halalgoes-network:
+        ipv4_address: 172.21.0.14
+    depends_on:
+      - temporal
+    stdin_open: true
+    tty: true
+
+  temporal-ui:
+    container_name: temporal-ui
+    image: temporalio/ui:latest
+    restart: unless-stopped
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    ports:
+      - "${TEMPORAL_UI_PORT:-8080}:8080"
+    networks:
+      halalgoes-network:
+        ipv4_address: 172.21.0.15
+    depends_on:
+      - temporal
+
+  api:
+    container_name: halalgoes-api
+    image: devsupreme0/halalgoes-api:${API_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: ${API_PORT:-3456}
+      DATABASE_URL: postgresql://${HG_DB_USER:-postgres}:${HG_DB_PASS}@postgres-halalgoes:5432/${HG_DB:-halalgoes_db}?schema=public
+      DB_DIRECT_URL: postgresql://${HG_DB_USER:-postgres}:${HG_DB_PASS}@postgres-halalgoes:5432/${HG_DB:-halalgoes_db}?schema=public
+      REDIS_HOST: redis-master
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      REDIS_KEYSPACE_NOTIFICATIONS: Ex
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-admin}
+      MINIO_ACCESS_SECRET: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "${API_PORT:-3456}:3456"
+      - "${WS_PORT:-9080}:9080"
+    depends_on:
+      - temporal
+      - postgres
+      - redis-master
+      - minio
+    networks:
+      halalgoes-network:
+        ipv4_address: 172.21.0.100
+
+networks:
+  halalgoes-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16
+
+volumes:
+  postgres_data:
+    driver: local
+  pgadmin_data:
+    driver: local
+  redis_replica1_data:
+    driver: local
+  redis_replica2_data:
+    driver: local
+  redis_sentinel_data:
+    driver: local
+  minio_data:
+    driver: local
+  temporal_config:
+    driver: local
